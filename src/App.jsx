@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { LayoutDashboard, CheckSquare, FolderKanban, Plus, Search, Leaf, GraduationCap, Code2, Music2, HeartHandshake, Wallet, House, CalendarDays, Circle, CheckCircle2, Pencil, Trash2, X, ArrowUpRight, Sun } from 'lucide-react';
+import { supabase } from './lib/supabaseClient';
 
 const areas = [
   {id:'college', name:'College & coursework', short:'College', icon:GraduationCap, tone:'sage', description:'Assignments, labs, and deadlines'},
@@ -25,6 +26,81 @@ function TaskList({tasks, onToggle, onEdit, onDelete, empty='Nothing on this lis
   </div>})}</div>
 }
 export default function App(){
+    const [session, setSession] = useState(null);
+    const [authLoading, setAuthLoading] = useState(true);
+    const [authMode, setAuthMode] = useState('signin');
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [authError, setAuthError] = useState('');
+    const [authMessage, setAuthMessage] = useState('');
+    const [authBusy, setAuthBusy] = useState(false);
+
+    useEffect(() => {
+      let mounted = true;
+
+      supabase.auth.getSession().then(({ data, error }) => {
+        if (!mounted) return;
+
+        if (error) setAuthError(error.message);
+        setSession(data.session ?? null);
+        setAuthLoading(false);
+      });
+
+      const {
+        data: { subscription },
+      } = supabase.auth.onAuthStateChange((_event, newSession) => {
+        setSession(newSession);
+      });
+
+      return () => {
+        mounted = false;
+        subscription.unsubscribe();
+      };
+    }, []);
+
+    async function handleAuth(e) {
+      e.preventDefault();
+      setAuthError('');
+      setAuthMessage('');
+      setAuthBusy(true);
+
+      try {
+        if (authMode === 'signup') {
+          const { data, error } = await supabase.auth.signUp({
+            email: email.trim(),
+            password,
+            options: {
+              emailRedirectTo: window.location.origin,
+            },
+          });
+
+          if (error) throw error;
+
+          setAuthMessage(
+            data.session
+              ? 'Account created! You are signed in.'
+              : 'Account created! Check your email to confirm your account.'
+          );
+        } else {
+          const { error } = await supabase.auth.signInWithPassword({
+            email: email.trim(),
+            password,
+          });
+
+          if (error) throw error;
+        }
+      } catch (error) {
+        setAuthError(error.message);
+      } finally {
+        setAuthBusy(false);
+      }
+    }
+
+    async function handleSignOut() {
+      const { error } = await supabase.auth.signOut();
+
+      if (error) setAuthError(error.message);
+    }
   const [tasks,setTasks]=useState(readTasks);const [view,setView]=useState('Overview');const [area,setArea]=useState('all');const [search,setSearch]=useState('');const [modal,setModal]=useState(false);const [editing,setEditing]=useState(null);const [form,setForm]=useState({title:'',area:'college',priority:'Medium',due:''});
   useEffect(()=>localStorage.setItem('pcc-tasks-v1',JSON.stringify(tasks)),[tasks]);
   const openCount=tasks.filter(t=>!t.done).length;const doneCount=tasks.filter(t=>t.done).length;
@@ -34,6 +110,106 @@ export default function App(){
   const save=e=>{e.preventDefault();if(!form.title.trim())return;if(editing!==null)setTasks(ts=>ts.map(t=>t.id===editing?{...t,...form,title:form.title.trim()}:t));else setTasks(ts=>[{...form,title:form.title.trim(),id:Date.now(),done:false},...ts]);setModal(false)};
   const toggle=id=>setTasks(ts=>ts.map(t=>t.id===id?{...t,done:!t.done}:t));const remove=id=>setTasks(ts=>ts.filter(t=>t.id!==id));
   const date=new Intl.DateTimeFormat('en-US',{weekday:'long',month:'long',day:'numeric'}).format(new Date());
+
+    if (authLoading) {
+    return <div className="auth-shell">
+      <div className="auth-card">
+        <h1>Command Center</h1>
+        <p>Connecting to your workspace...</p>
+      </div>
+    </div>;
+  }
+
+  if (!session) {
+    return (
+      <div className="auth-shell">
+        <form className="auth-card" onSubmit={handleAuth}>
+          <div className="brand-mark">
+            <Leaf size={22} />
+          </div>
+
+          <div className="eyebrow">YOUR PERSONAL HOME BASE</div>
+
+          <h1>
+            {authMode === 'signup'
+              ? 'Create your account'
+              : 'Welcome back'}
+          </h1>
+
+          <p>Sign in to access your personal workspace.</p>
+
+          {authError && (
+            <p className="auth-error">{authError}</p>
+          )}
+
+          {authMessage && (
+            <p className="auth-message">{authMessage}</p>
+          )}
+
+          <label>
+            Email address
+            <input
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="you@example.com"
+            />
+          </label>
+
+          <label>
+            Password
+            <input
+              type="password"
+              required
+              minLength={6}
+              autoComplete={
+                authMode === 'signup'
+                  ? 'new-password'
+                  : 'current-password'
+              }
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="At least 6 characters"
+            />
+          </label>
+
+          <button
+            className="primary"
+            type="submit"
+            disabled={authBusy}
+          >
+            {authBusy
+              ? 'Please wait...'
+              : authMode === 'signup'
+                ? 'Create account'
+                : 'Sign in'}
+          </button>
+
+          <p>
+            {authMode === 'signup'
+              ? 'Already have an account?'
+              : 'New here?'}{' '}
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode(
+                  authMode === 'signup' ? 'signin' : 'signup'
+                );
+                setAuthError('');
+                setAuthMessage('');
+              }}
+            >
+              {authMode === 'signup'
+                ? 'Sign in'
+                : 'Create account'}
+            </button>
+          </p>
+        </form>
+      </div>
+    );
+  }  
   return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><Leaf size={21}/></div><div><b>Command Center</b><small>PERSONAL WORKSPACE</small></div></div>
     <div className="side-label">WORKSPACE</div><nav>{[{label:'Overview',icon:LayoutDashboard},{label:'All tasks',icon:CheckSquare},{label:'Projects',icon:FolderKanban},{label:'Completed',icon:CheckCircle2}].map(n=><button key={n.label} className={`nav ${view===n.label&&area==='all'?'selected':''}`} onClick={()=>{setView(n.label);setArea('all')}}><n.icon size={17}/><span>{n.label}</span>{n.label==='All tasks'&&<i>{openCount}</i>}</button>)}</nav>
     <div className="side-label area-label">YOUR AREAS <button onClick={newTask}><Plus size={15}/></button></div><nav>{areas.map(a=><button key={a.id} className={`nav ${area===a.id?'selected':''}`} onClick={()=>{setArea(a.id);setView('All tasks')}}><span className={`area-icon ${a.tone}`}><a.icon size={15}/></span><span>{a.short}</span><i>{tasks.filter(t=>t.area===a.id&&!t.done).length}</i></button>)}</nav>
