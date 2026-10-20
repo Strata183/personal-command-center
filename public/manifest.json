@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Personal Command Center",
+  "version": "0.1.0",
+  "description": "A thoughtful dashboard for your tasks, projects, and daily priorities.",
+  "chrome_url_overrides": {
+    "newtab": "index.html"
+  },
+  "host_permissions": [
+    "https://*.supabase.co/*"
+  ]
+}

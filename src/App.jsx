@@ -10,13 +10,39 @@ const areas = [
   {id:'finance', name:'Personal finance', short:'Finance', icon:Wallet, tone:'mint', description:'Budget, savings, and reviews'},
   {id:'personal', name:'Personal goals', short:'Personal', icon:House, tone:'lavender', description:'Life admin and longer-term goals'},
 ];
-const starter = [
-  {id:1,title:'Review the next coursework deadline',area:'college',priority:'High',due:'',done:false},
-  {id:2,title:'Choose the next feature for the command center',area:'coding',priority:'High',due:'',done:false},
-  {id:3,title:'Review the worship night song and team plan',area:'worship',priority:'Medium',due:'',done:false},
-  {id:4,title:'Check this week’s spending and savings',area:'finance',priority:'Low',due:'',done:false},
+const starterTasks = [
+  {title:'Review the next coursework deadline',project:'college',priority:'High'},
+  {title:'Choose the next feature for the command center',project:'coding',priority:'High'},
+  {title:'Review the worship night song and team plan',project:'worship',priority:'Medium'},
+  {title:'Check this week’s spending and savings',project:'finance',priority:'Low'},
 ];
-function readTasks(){try{return JSON.parse(localStorage.getItem('pcc-tasks-v1')) || starter}catch{return starter}}
+function mapTask(row){
+  return {
+    id: row.id,
+    title: row.title,
+    area: row.project || 'college',
+    priority: row.priority || 'Medium',
+    due: row.due_date || '',
+    done: row.is_complete ?? false,
+  };
+}
+const pendingTaskLoads = new Map();
+function loadTasksForUser(userId){
+  if(pendingTaskLoads.has(userId))return pendingTaskLoads.get(userId);
+  const request=(async()=>{
+    const {data,error}=await supabase.from('tasks').select('*').eq('user_id',userId);
+    if(error)throw error;
+    if(data?.length)return data.map(mapTask);
+    const {data:created,error:createError}=await supabase.from('tasks')
+      .insert(starterTasks.map(task=>({...task,user_id:userId,due_date:null,is_complete:false})))
+      .select('*');
+    if(createError)throw createError;
+    return (created||[]).map(mapTask);
+  })();
+  pendingTaskLoads.set(userId,request);
+  request.then(()=>pendingTaskLoads.delete(userId),()=>pendingTaskLoads.delete(userId));
+  return request;
+}
 function TaskList({tasks, onToggle, onEdit, onDelete, empty='Nothing on this list yet. Add a task to get started.'}){
   if(!tasks.length)return <div className="empty"><CheckCircle2 size={25}/><b>You're all caught up.</b><p>{empty}</p></div>;
   return <div className="task-list">{tasks.map(t=>{const a=areas.find(x=>x.id===t.area)||areas[0];return <div className={`task ${t.done?'done':''}`} key={t.id}>
@@ -99,16 +125,69 @@ export default function App(){
     async function handleSignOut() {
       const { error } = await supabase.auth.signOut();
 
-      if (error) setAuthError(error.message);
+      if (error) setActionError(error.message);
     }
-  const [tasks,setTasks]=useState(readTasks);const [view,setView]=useState('Overview');const [area,setArea]=useState('all');const [search,setSearch]=useState('');const [modal,setModal]=useState(false);const [editing,setEditing]=useState(null);const [form,setForm]=useState({title:'',area:'college',priority:'Medium',due:''});
-  useEffect(()=>localStorage.setItem('pcc-tasks-v1',JSON.stringify(tasks)),[tasks]);
+  const [tasks,setTasks]=useState([]);const [tasksLoading,setTasksLoading]=useState(false);const [tasksError,setTasksError]=useState('');const [actionError,setActionError]=useState('');const [saving,setSaving]=useState(false);const [busyTaskIds,setBusyTaskIds]=useState([]);const [loadAttempt,setLoadAttempt]=useState(0);const [view,setView]=useState('Overview');const [area,setArea]=useState('all');const [search,setSearch]=useState('');const [modal,setModal]=useState(false);const [editing,setEditing]=useState(null);const [form,setForm]=useState({title:'',area:'college',priority:'Medium',due:''});
+  useEffect(()=>{
+    if(!session){setTasks([]);setTasksLoading(false);setTasksError('');return;}
+    let active=true;
+    setTasksLoading(true);
+    setTasksError('');
+    loadTasksForUser(session.user.id)
+      .then(data=>{if(active)setTasks(data);})
+      .catch(error=>{if(active)setTasksError(error.message || 'Could not load your tasks.');})
+      .finally(()=>{if(active)setTasksLoading(false);});
+    return ()=>{active=false;};
+  },[session,loadAttempt]);
   const openCount=tasks.filter(t=>!t.done).length;const doneCount=tasks.filter(t=>t.done).length;
+  const accountName=session?.user?.email?.split('@')[0]?.replace(/[._-]+/g,' ').replace(/\b\w/g,char=>char.toUpperCase())||'friend';
+  const greetingHour=new Date().getHours();
+  const greeting=greetingHour<12?'Good morning':greetingHour<18?'Good afternoon':'Good evening';
   const filtered=useMemo(()=>tasks.filter(t=>(area==='all'||t.area===area)&&(view!=='Completed'||t.done)&&t.title.toLowerCase().includes(search.toLowerCase())),[tasks,area,view,search]);
   const newTask=()=>{setEditing(null);setForm({title:'',area:area==='all'?'college':area,priority:'Medium',due:''});setModal(true)};
   const editTask=t=>{setEditing(t.id);setForm({title:t.title,area:t.area,priority:t.priority,due:t.due||''});setModal(true)};
-  const save=e=>{e.preventDefault();if(!form.title.trim())return;if(editing!==null)setTasks(ts=>ts.map(t=>t.id===editing?{...t,...form,title:form.title.trim()}:t));else setTasks(ts=>[{...form,title:form.title.trim(),id:Date.now(),done:false},...ts]);setModal(false)};
-  const toggle=id=>setTasks(ts=>ts.map(t=>t.id===id?{...t,done:!t.done}:t));const remove=id=>setTasks(ts=>ts.filter(t=>t.id!==id));
+  async function save(e){
+    e.preventDefault();
+    const title=form.title.trim();
+    if(!title||saving)return;
+    setActionError('');setSaving(true);
+    const row={title,project:form.area,due_date:form.due||null,priority:form.priority};
+    try{
+      if(editing!==null){
+        const {data,error}=await supabase.from('tasks').update(row).eq('id',editing).eq('user_id',session.user.id).select('*').single();
+        if(error)throw error;
+        setTasks(ts=>ts.map(t=>t.id===editing?mapTask(data):t));
+      }else{
+        const {data,error}=await supabase.from('tasks').insert({...row,user_id:session.user.id,is_complete:false}).select('*').single();
+        if(error)throw error;
+        setTasks(ts=>[mapTask(data),...ts]);
+      }
+      setModal(false);
+    }catch(error){setActionError(error.message||'Could not save this task.');}
+    finally{setSaving(false);}
+  }
+  async function toggle(id){
+    if(busyTaskIds.includes(id))return;
+    const task=tasks.find(t=>t.id===id);if(!task)return;
+    setActionError('');setBusyTaskIds(ids=>[...ids,id]);
+    try{
+      const {data,error}=await supabase.from('tasks').update({is_complete:!task.done}).eq('id',id).eq('user_id',session.user.id).select('*').single();
+      if(error)throw error;
+      setTasks(ts=>ts.map(t=>t.id===id?mapTask(data):t));
+    }catch(error){setActionError(error.message||'Could not update this task.');}
+    finally{setBusyTaskIds(ids=>ids.filter(taskId=>taskId!==id));}
+  }
+  async function remove(id){
+    if(busyTaskIds.includes(id))return;
+    setActionError('');setBusyTaskIds(ids=>[...ids,id]);
+    try{
+      const {data,error}=await supabase.from('tasks').delete().eq('id',id).eq('user_id',session.user.id).select('id');
+      if(error)throw error;
+      if(!data?.length)throw new Error('Task not found or you do not have permission to delete it.');
+      setTasks(ts=>ts.filter(t=>t.id!==id));
+    }catch(error){setActionError(error.message||'Could not delete this task.');}
+    finally{setBusyTaskIds(ids=>ids.filter(taskId=>taskId!==id));}
+  }
   const date=new Intl.DateTimeFormat('en-US',{weekday:'long',month:'long',day:'numeric'}).format(new Date());
 
     if (authLoading) {
@@ -214,14 +293,17 @@ export default function App(){
     <div className="side-label">WORKSPACE</div><nav>{[{label:'Overview',icon:LayoutDashboard},{label:'All tasks',icon:CheckSquare},{label:'Projects',icon:FolderKanban},{label:'Completed',icon:CheckCircle2}].map(n=><button key={n.label} className={`nav ${view===n.label&&area==='all'?'selected':''}`} onClick={()=>{setView(n.label);setArea('all')}}><n.icon size={17}/><span>{n.label}</span>{n.label==='All tasks'&&<i>{openCount}</i>}</button>)}</nav>
     <div className="side-label area-label">YOUR AREAS <button onClick={newTask}><Plus size={15}/></button></div><nav>{areas.map(a=><button key={a.id} className={`nav ${area===a.id?'selected':''}`} onClick={()=>{setArea(a.id);setView('All tasks')}}><span className={`area-icon ${a.tone}`}><a.icon size={15}/></span><span>{a.short}</span><i>{tasks.filter(t=>t.area===a.id&&!t.done).length}</i></button>)}</nav>
     <div className="sidebar-bottom"><div className="quote"><Sun size={17}/><b>One step at a time.</b><p>You don't need to do everything today. Just the next right thing.</p></div><small className="version">VERSION 0.1 · LOCAL PREVIEW</small></div></aside>
-    <main><header className="topbar"><div className="crumb">Workspace <span>›</span> <b>{area!=='all'?(areas.find(a=>a.id===area)?.short||view):view}</b></div><div className="top-right"><label className="search"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search tasks..."/></label><div className="avatar">Y</div></div></header>
-      <div className="content"><section className="welcome"><div><div className="eyebrow"><span/> YOUR PERSONAL HOME BASE</div><h1>{view==='Overview'&&area==='all'?'Good afternoon, friend':area!=='all'?areas.find(a=>a.id===area)?.name:view}.</h1><p>{date} <span>·</span> Make room for what matters.</p></div><button className="primary" onClick={newTask}><Plus size={17}/> New task</button></section>
+    <main><header className="topbar"><div className="crumb">Workspace <span>›</span> <b>{area!=='all'?(areas.find(a=>a.id===area)?.short||view):view}</b></div><div className="top-right"><label className="search"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search tasks..."/></label><div className="account"><div className="avatar" aria-label={`Signed in as ${session.user.email}`}>{accountName.charAt(0).toUpperCase()}</div><span title={session.user.email}>{session.user.email}</span><button className="sign-out" onClick={handleSignOut}>Sign out</button></div></div></header>
+      <div className="content"><section className="welcome"><div><div className="eyebrow"><span/> YOUR PERSONAL HOME BASE</div><h1>{view==='Overview'&&area==='all'?`${greeting}, ${accountName}`:area!=='all'?areas.find(a=>a.id===area)?.name:view}.</h1><p>{date} <span>·</span> Make room for what matters.</p></div><button className="primary" onClick={newTask}><Plus size={17}/> New task</button></section>
+      {tasksError&&<div className="data-error" role="alert"><span>Tasks could not be loaded: {tasksError}</span><button onClick={()=>setLoadAttempt(n=>n+1)}>Try again</button></div>}
+      {actionError&&<div className="data-error" role="alert"><span>{actionError}</span><button onClick={()=>setActionError('')}>Dismiss</button></div>}
+      {tasksLoading&&<div className="data-loading" role="status">Loading your tasks…</div>}
       {view==='Overview'&&area==='all'?<><section className="hero"><div className="hero-copy"><div className="hero-kicker">A LITTLE CLARITY GOES A LONG WAY</div><h2>Start with what<br/>matters most.</h2><p>Your goals are big. Your next step can be small. Pick a priority and get moving.</p><button className="hero-button" onClick={()=>setView('All tasks')}>See my tasks <ArrowUpRight size={16}/></button></div><div className="landscape"><div className="sun-disc"/><div className="hill back"/><div className="hill front"/></div><div className="hero-number">YOUR DAY, YOUR PACE <b>01</b></div></section>
         <section className="stats"><div><span>Open tasks</span><b>{openCount}</b><small>Ready for your attention</small></div><div><span>Completed</span><b>{doneCount}</b><small>Small wins count</small></div><div><span>Focus areas</span><b>{areas.length}</b><small>Parts of life in one place</small></div></section>
         <section className="section-head"><div><h2>Today's focus</h2><p>A short list beats a long wish list.</p></div><button className="text-button" onClick={()=>setView('All tasks')}>View all ↗</button></section><TaskList tasks={tasks.filter(t=>!t.done).slice(0,4)} onToggle={toggle} onEdit={editTask} onDelete={remove}/>
         <section className="section-head areas-head"><div><h2>Your areas</h2><p>Keep the different parts of life connected.</p></div></section><div className="areas-grid">{areas.map(a=><button className="area-card" key={a.id} onClick={()=>{setArea(a.id);setView('All tasks')}}><span className={`big-icon ${a.tone}`}><a.icon size={19}/></span><b>{a.name}</b><p>{a.description}</p><div>{tasks.filter(t=>t.area===a.id&&!t.done).length} open tasks <span>↗</span></div></button>)}</div>
       </>:<section className="task-page"><div className="section-head"><div><h2>{view==='Completed'?'Completed tasks':view==='Projects'&&area==='all'?'Your areas':'Task list'}</h2><p>{view==='Projects'&&area==='all'?'Choose an area to view its tasks':`${filtered.length} task${filtered.length===1?'':'s'} shown`}</p></div><button className="secondary" onClick={newTask}><Plus size={16}/> Add task</button></div>{view==='Projects'&&area==='all'?<div className="areas-grid">{areas.map(a=><button className="area-card" key={a.id} onClick={()=>setArea(a.id)}><span className={`big-icon ${a.tone}`}><a.icon size={19}/></span><b>{a.name}</b><p>{a.description}</p><div>{tasks.filter(t=>t.area===a.id&&!t.done).length} open tasks <span>↗</span></div></button>)}</div>:<TaskList tasks={filtered} onToggle={toggle} onEdit={editTask} onDelete={remove}/>}</section>}
       <footer className="footer"><Leaf size={14}/> Built for a life with purpose, not just a longer to-do list.</footer></div></main>
-    {modal&&<div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setModal(false)}}><form className="modal" onSubmit={save}><header><div><div className="eyebrow">MAKE IT ACTIONABLE</div><h2>{editing!==null?'Edit task':'Add a task'}</h2></div><button type="button" className="close" onClick={()=>setModal(false)}><X size={19}/></button></header><label>Task name<input autoFocus required value={form.title} onChange={e=>setForm({...form,title:e.target.value})} placeholder="What needs to get done?"/></label><div className="form-row"><label>Area<select value={form.area} onChange={e=>setForm({...form,area:e.target.value})}>{areas.map(a=><option value={a.id} key={a.id}>{a.name}</option>)}</select></label><label>Priority<select value={form.priority} onChange={e=>setForm({...form,priority:e.target.value})}><option>Low</option><option>Medium</option><option>High</option></select></label></div><label>Due date <small>(optional)</small><input type="date" value={form.due} onChange={e=>setForm({...form,due:e.target.value})}/></label><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setModal(false)}>Cancel</button><button className="primary" type="submit">{editing!==null?'Save changes':'Create task'}</button></div></form></div>}
+    {modal&&<div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget&&!saving)setModal(false)}}><form className="modal" onSubmit={save}><header><div><div className="eyebrow">MAKE IT ACTIONABLE</div><h2>{editing!==null?'Edit task':'Add a task'}</h2></div><button type="button" className="close" disabled={saving} onClick={()=>setModal(false)}><X size={19}/></button></header><label>Task name<input autoFocus required value={form.title} onChange={e=>setForm({...form,title:e.target.value})} placeholder="What needs to get done?"/></label><div className="form-row"><label>Area<select value={form.area} onChange={e=>setForm({...form,area:e.target.value})}>{areas.map(a=><option value={a.id} key={a.id}>{a.name}</option>)}</select></label><label>Priority<select value={form.priority} onChange={e=>setForm({...form,priority:e.target.value})}><option>Low</option><option>Medium</option><option>High</option></select></label></div><label>Due date <small>(optional)</small><input type="date" value={form.due} onChange={e=>setForm({...form,due:e.target.value})}/></label><div className="modal-actions"><button type="button" className="secondary" disabled={saving} onClick={()=>setModal(false)}>Cancel</button><button className="primary" type="submit" disabled={saving}>{saving?'Saving…':editing!==null?'Save changes':'Create task'}</button></div></form></div>}
   </div>
 }
